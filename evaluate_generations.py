@@ -1,8 +1,6 @@
 import os
-import sys
 import json
 import glob
-import math
 import torch
 import random
 import shutil
@@ -17,9 +15,11 @@ from accelerate import Accelerator
 from collections import defaultdict
 from statistics import mean, harmonic_mean
 from rouge_score import rouge_scorer
-from torch.utils.data import DataLoader
 from sklearn.metrics import roc_curve, auc
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
+from transformers import AutoTokenizer, AutoModelForCausalLM
+#from hf_olmo import OLMoForCausalLM  # pip install ai2-olmo
+
+
 
 def get_args_and_verify():
     parser = argparse.ArgumentParser(description="Script to run inference and evaluation")
@@ -88,19 +88,21 @@ def inference(args, model, tokenizer):
 
         with accelerator.split_between_processes(train_dataset, apply_padding=True) as data:
             for idx in tqdm(range(len(data['input']))):
-                question, answer = data["input"][idx], data["output"][idx]
+                question, answer = list(data["input"][idx].values()), list(data["output"][idx].values())
+                #print(type(question), type(answer), list(answer.values()))
                 output_dic[accelerator.process_index]['id'].append(data["id"][idx])
                 output_dic[accelerator.process_index]['task'].append(data["task"][idx])
                 output_dic[accelerator.process_index]['input'].append(data["input"][idx])
                 output_dic[accelerator.process_index]['expected_output'].append(data["output"][idx])
                 input_ids = tokenizer(
                     question,
-                    return_tensors='pt'
+                    return_tensors='pt',
+                    padding=True
                 ).input_ids.to(model.device)
 
                 combined_input_ids = tokenizer(
                     question+answer,
-                    return_tensors='pt'
+                    return_tensors='pt',
                 ).input_ids.to(model.device)
                 combined_target_ids = combined_input_ids.clone()
                 combined_target_ids[:,:len(input_ids[0])] = -100
@@ -278,6 +280,7 @@ def compute_metrics(args):
 
 def main():
     args = get_args_and_verify()
+    #tokenizer_path = "allenai/OLMo-1B"
 
     # Set random seed
     random.seed(args.seed)
@@ -293,7 +296,6 @@ def main():
     accelerator = Accelerator()
     if not args.compute_metrics_only:
         model = AutoModelForCausalLM.from_pretrained(checkpoint_path, torch_dtype=torch.bfloat16, trust_remote_code = True) # .to('cuda')
-
         tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
         tokenizer.pad_token = tokenizer.eos_token
     
