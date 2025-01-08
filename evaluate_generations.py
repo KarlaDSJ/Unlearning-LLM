@@ -1,6 +1,8 @@
 import os
+import sys
 import json
 import glob
+import math
 import torch
 import random
 import shutil
@@ -15,11 +17,9 @@ from accelerate import Accelerator
 from collections import defaultdict
 from statistics import mean, harmonic_mean
 from rouge_score import rouge_scorer
+from torch.utils.data import DataLoader
 from sklearn.metrics import roc_curve, auc
-from transformers import AutoTokenizer, AutoModelForCausalLM
-#from hf_olmo import OLMoForCausalLM  # pip install ai2-olmo
-
-
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 
 def get_args_and_verify():
     parser = argparse.ArgumentParser(description="Script to run inference and evaluation")
@@ -88,21 +88,19 @@ def inference(args, model, tokenizer):
 
         with accelerator.split_between_processes(train_dataset, apply_padding=True) as data:
             for idx in tqdm(range(len(data['input']))):
-                question, answer = list(data["input"][idx].values()), list(data["output"][idx].values())
-                #print(type(question), type(answer), list(answer.values()))
+                question, answer = data["input"][idx], data["output"][idx]
                 output_dic[accelerator.process_index]['id'].append(data["id"][idx])
                 output_dic[accelerator.process_index]['task'].append(data["task"][idx])
                 output_dic[accelerator.process_index]['input'].append(data["input"][idx])
                 output_dic[accelerator.process_index]['expected_output'].append(data["output"][idx])
                 input_ids = tokenizer(
                     question,
-                    return_tensors='pt',
-                    padding=True
+                    return_tensors='pt'
                 ).input_ids.to(model.device)
 
                 combined_input_ids = tokenizer(
                     question+answer,
-                    return_tensors='pt',
+                    return_tensors='pt'
                 ).input_ids.to(model.device)
                 combined_target_ids = combined_input_ids.clone()
                 combined_target_ids[:,:len(input_ids[0])] = -100
@@ -255,7 +253,9 @@ def compute_metrics(args):
             shutil.rmtree(mia_results_dir)
 
         auc = compute_auc(mia_results['member'], mia_results['nonmember'])
-        # Best MIA rates we can get are ~0.5. 1 implies model still remembers the forget set
+        # Best MIA rates we can get are ~0.5. 
+        # Scores close to 1 suggest under-unlearning
+        # Scores close to 0 suggest over-unlearning
         results['mia_loss_acc'] = auc
 #        aggregate_scores_list.append(1 - auc) 
 
@@ -268,11 +268,19 @@ def compute_metrics(args):
     results['aggregated-terms'] = aggregate_scores_list
 
     task_aggregate = harmonic_mean(aggregate_scores_list)
+    results['aggregate-score'] = -1
+
     results['harmonic-mean-task-aggregate'] = task_aggregate
+
+    # Need MMLU and MIA scores to compute the aggregate
     if 'mmlu_average' in results and 'mia_loss_acc' in results:
-        results['aggregate-score'] = mean([task_aggregate, results['mmlu_average'], 1 - results['mia_loss_acc']])
-    else:   # Need MMLU and MIA scores to compute the aggregate
-        results['aggregate-score'] = -1
+        if results['mmlu_average'] < 0.371:
+            # MMLU score should not drop below 75% of pre-unlearning preformance
+            print(f"[WARNING] The MMLU average for the provided checkpoint is below threshold. If this happens your model may not be considered in final challenge ranking.")
+
+        mia_final_score = 1 - abs(results['mia_loss_acc'] - 0.5)*2
+        results['mia_final_score'] = mia_final_score
+        results['aggregate-score'] = mean([task_aggregate, results['mmlu_average'], mia_final_score])
 
     metrics_file = os.path.join(args.output_dir, 'evaluation_results.jsonl')
     with open(metrics_file, 'w') as outptr:
@@ -280,7 +288,6 @@ def compute_metrics(args):
 
 def main():
     args = get_args_and_verify()
-    #tokenizer_path = "allenai/OLMo-1B"
 
     # Set random seed
     random.seed(args.seed)
@@ -296,6 +303,7 @@ def main():
     accelerator = Accelerator()
     if not args.compute_metrics_only:
         model = AutoModelForCausalLM.from_pretrained(checkpoint_path, torch_dtype=torch.bfloat16, trust_remote_code = True) # .to('cuda')
+
         tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
         tokenizer.pad_token = tokenizer.eos_token
     
