@@ -1,4 +1,3 @@
-from huggingface_hub import snapshot_download
 from transformers import AutoModelForCausalLM, AutoTokenizer
 hf_token = "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"   #token
 
@@ -16,5 +15,3 @@ def unlearn(path_forget,
         path_checkpoints (str): Path to the output directory to store the unlearned checkpoints.
     '''
     pass
-
-
