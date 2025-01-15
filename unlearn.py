@@ -1,5 +1,7 @@
 import torch
 import pandas as pd
+import spacy
+nlp = spacy.load('en_core_web_sm')
 from transformers import (AutoModelForCausalLM,
                           AutoTokenizer,
                           BitsAndBytesConfig,
@@ -25,10 +27,19 @@ def concat_input_output(input, output):
     text.append(f'{i}\n  {o}')
   return text
 
+def get_ner(text):
+  """It returns the entities from a text"""
+  doc = nlp(text)
+  entities = ''
+  for ent in doc.ents:
+    entities += ent.text + ' '
+  return entities
+
 def read_data(path, name):
     data = pd.read_parquet(f'{path}/{name}', engine='pyarrow')
     data = data[['id','input', 'output']]
     data['text'] = concat_input_output(data.input.values, data.output.values)
+    data['entities'] = data.text.apply(get_ner)
     return Dataset.from_pandas(data)
 
 def get_model(path):
@@ -85,7 +96,7 @@ def do_gradient_ascent(model,tokenizer,dataset,path_checkpoints):
         max_seq_length=512,
         report_to='none',
         output_dir="/tmp",
-        dataset_text_field="text",
+        dataset_text_field="entities",
         packing=True,
     )
 
@@ -118,10 +129,10 @@ def do_fine_tune(model,tokenizer,dataset,path_checkpoints):
     trainer.train()
     trainer.save_model(f"{path_checkpoints}/fine_tune_Gradient_Ascent")
 
-def unlearn(path_forget, 
-            path_retain, 
-            path_model, 
-            path_checkpoints):
+def unlearn(path_model, 
+            path_checkpoints,
+            path_forget, 
+            path_retain):
     '''
     Unlearning sensitive content (forget dataset) from Large Language Models
 
